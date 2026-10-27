@@ -1,0 +1,534 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rubik’s Cube</title>
+  <style>
+    :root { color-scheme: light; --background: #e9e7e4; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      min-height: 100svh;
+      display: grid;
+      place-items: center;
+      background: var(--background);
+    }
+    h1 {
+      position: absolute;
+      top: clamp(20px, 5vh, 52px);
+      left: 0;
+      right: 0;
+      margin: 0;
+      text-align: center;
+      color: #453c38;
+      font: 400 clamp(36px, 5vw, 50px)/1.1 "Iowan Old Style", Baskerville, "Palatino Linotype", Georgia, serif;
+      letter-spacing: -0.035em;
+    }
+    .tagline {
+      position: absolute;
+      bottom: clamp(20px, 5vh, 52px);
+      left: 0;
+      right: 0;
+      margin: 0;
+      padding: 0 20px;
+      text-align: center;
+      color: #453c38;
+      font: 400 clamp(18px, 3vw, 25px)/1.4 "Iowan Old Style", Baskerville, "Palatino Linotype", Georgia, serif;
+    }
+    .cube {
+      display: block;
+      width: min(108vw, 570px, 111svh);
+      max-width: 96vw;
+      max-height: 96svh;
+      height: auto;
+      overflow: visible;
+    }
+  </style>
+</head>
+<body>
+  <h1>hadi</h1>
+  <svg class="cube" viewBox="-170 -185 340 370" role="img" aria-labelledby="cube-title cube-description">
+    <title id="cube-title">Rubik’s Cube, viewed from a corner</title>
+    <desc id="cube-description">An isometric Rubik’s Cube. Every two seconds, a random pattern plays, turning one or more cube layers or moving all three hexagonal rings together. Adjacent layers follow each other with a slight delay. Every tile has a red, blue, green, cyan, orange, purple, or yellow gradient across a 7 by 7 grid of triangles, circles, squares, circular rings, or square rings. Between moves, three equally visible faces form nested rings of 3, 9, and 15 tiles.</desc>
+    <defs id="glyphs"></defs>
+    <g id="cube"></g>
+  </svg>
+  <p class="tagline">Push the frontier of your talents</p>
+  <script>
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+    const cube = document.querySelector('#cube');
+    const unitX = 46;
+    const unitY = unitX / Math.sqrt(3);
+
+    const TURN_INTERVAL = 2000;
+    const TURN_DURATION = 750;
+    const RING_DURATION = 1100;
+    const LAYER_STAGGER = 120;
+    const RING_STEPS = [1, 3, 5];
+    const GRID_SIZE = 7;
+    const SHAPES = ['triangle', 'circle', 'square', 'circle-ring', 'square-ring'];
+    const GRADIENTS = {
+      red: ['#c44d70', '#e45e52', '#ed9850'],
+      blue: ['#9562ae', '#727ac3', '#78a6ba'],
+      green: ['#7c9971', '#9eaf64', '#c3bd76'],
+      cyan: ['#6b97a2', '#79b3af', '#a3c6ac'],
+      orange: ['#d77865', '#e99a56', '#efbb77'],
+      purple: ['#cb7b94', '#ae79ad', '#9684bb'],
+      yellow: ['#dca24b', '#e8bf60', '#f1d88c']
+    };
+    buildGlyphs();
+    const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+    // Each line is one animation; adjacent layers are slightly staggered.
+    // Coordinates: bottom-center origin; X right, Y left, Z up; values 0–2.
+    const PATTERNS = [
+      '(0,0,0) -> (2,0,2) +',
+      '(0,0,0) -> (2,2,0) +',
+      '(2,0,0) -> (2,2,2) +',
+      'outer+; mid-; inner+',
+      'outer-; mid+; inner-',
+      '(0,0,0) -> (2,2,0) +; (0,0,1) -> (2,2,1) -',
+      '(0,0,0) -> (0,2,2) +; (1,0,0) -> (1,2,2) +; (2,0,0) -> (2,2,2) +'
+    ];
+    // Extend the examples with every parallel-layer subset and direction mix:
+    // singles, adjacent pairs, separated pairs, and all three layers (78 total).
+    const variations = [];
+    for (let axis = 0; axis < 3; axis++) {
+      for (let mask = 1; mask < 8; mask++) {
+        const layers = [0, 1, 2].filter(layer => mask & (1 << layer));
+        for (let signs = 0; signs < 2 ** layers.length; signs++) {
+          variations.push(layers.map((layer, index) => {
+            const from = [0, 0, 0];
+            const to = [2, 2, 2];
+            from[axis] = to[axis] = layer;
+            return `(${from}) -> (${to}) ${signs & (1 << index) ? '+' : '-'}`;
+          }).join('; '));
+        }
+      }
+    }
+    const patterns = [...new Map([...PATTERNS, ...variations].map(text => {
+      const pattern = parsePattern(text);
+      const key = pattern.moves.map(move => pattern.type === 'layer'
+        ? `${move.axis}:${move.layer}:${move.direction}` : `${move.ring}:${move.direction}`).sort().join(';');
+      return [pattern.type + key, pattern];
+    })).values()];
+    const layerPatterns = patterns.filter(pattern => pattern.type === 'layer');
+    const ringPatterns = patterns.filter(pattern => pattern.type === 'ring');
+    const cubies = [];
+    let activeTurn = null;
+    let nextTurnAt = performance.now() + TURN_INTERVAL;
+
+    // Keep all 27 cubies and all six colors in 3D, including hidden faces.
+    // A turn moves real pieces, so every later move preserves the scramble.
+    const sides = [
+      { normal: [1, 0, 0], color: 'red' },
+      { normal: [-1, 0, 0], color: 'orange' },
+      { normal: [0, 1, 0], color: 'yellow' },
+      { normal: [0, -1, 0], color: 'cyan' },
+      { normal: [0, 0, 1], color: 'blue' },
+      { normal: [0, 0, -1], color: 'green' }
+    ];
+    for (let x = -1; x <= 1; x++) {
+      for (let y = -1; y <= 1; y++) {
+        for (let z = -1; z <= 1; z++) {
+          const position = [x, y, z];
+          cubies.push({
+            position,
+            faces: sides.map(side => ({
+              normal: [...side.normal],
+              shape: SHAPES[Math.floor(Math.random() * SHAPES.length)],
+              // Local corners retain the motif's orientation through 3D turns.
+              corners: faceCorners([0, 0, 0], side.normal, 0.5),
+              color: position.some((coordinate, axis) =>
+                side.normal[axis] !== 0 && coordinate === side.normal[axis]
+              ) ? side.color : null
+            }))
+          });
+        }
+      }
+    }
+
+    function rotate(vector, axis, angle) {
+      const result = [...vector];
+      const a = (axis + 1) % 3;
+      const b = (axis + 2) % 3;
+      result[a] = vector[a] * Math.cos(angle) - vector[b] * Math.sin(angle);
+      result[b] = vector[a] * Math.sin(angle) + vector[b] * Math.cos(angle);
+      return result;
+    }
+
+    function project([x, y, z]) {
+      return [(x - z) * unitX, (x + z - 2 * y) * unitY];
+    }
+
+    function faceCorners(position, normal, halfWidth) {
+      const axis = normal.findIndex(value => value !== 0);
+      const a = (axis + 1) % 3;
+      const b = (axis + 2) % 3;
+      return [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([u, v]) => {
+        const point = [...position];
+        point[axis] += normal[axis] * 0.5;
+        point[a] += u * halfWidth;
+        point[b] += v * halfWidth;
+        return point;
+      });
+    }
+
+    function buildGlyphs() {
+      const defs = document.querySelector('#glyphs');
+      // Unit-space gradients span the whole tile, including the spaces
+      // between glyphs, and inherit the tile's animated projection.
+      for (const [name, colors] of Object.entries(GRADIENTS)) {
+        const gradient = document.createElementNS(SVG_NS, 'linearGradient');
+        for (const [key, value] of Object.entries({
+          id: 'gradient-' + name, gradientUnits: 'userSpaceOnUse',
+          x1: 0, y1: 0, x2: 1, y2: 1
+        })) gradient.setAttribute(key, value);
+        colors.forEach((color, index) => {
+          const stop = document.createElementNS(SVG_NS, 'stop');
+          stop.setAttribute('offset', index / (colors.length - 1));
+          stop.setAttribute('stop-color', color);
+          gradient.append(stop);
+        });
+        defs.append(gradient);
+      }
+      for (const [name, colors] of Object.entries(GRADIENTS)) {
+        for (let row = 0; row < GRID_SIZE; row++) for (let column = 0; column < GRID_SIZE; column++) {
+          const gradient = document.createElementNS(SVG_NS, 'linearGradient');
+          for (const [key, value] of Object.entries({
+            id: `particle-${name}-${row}-${column}`, gradientUnits: 'userSpaceOnUse',
+            x1: -column - 0.5, y1: -row - 0.5,
+            x2: GRID_SIZE - column - 0.5, y2: GRID_SIZE - row - 0.5
+          })) gradient.setAttribute(key, value);
+          colors.forEach((color, index) => {
+            const stop = document.createElementNS(SVG_NS, 'stop');
+            stop.setAttribute('offset', index / (colors.length - 1));
+            stop.setAttribute('stop-color', color);
+            gradient.append(stop);
+          });
+          defs.append(gradient);
+        }
+      }
+      for (const shape of SHAPES) {
+        const ring = shape.endsWith('-ring');
+        const tag = shape === 'triangle' ? 'polygon' : shape.startsWith('circle') ? 'circle' : 'rect';
+        const glyph = document.createElementNS(SVG_NS, tag);
+        const radius = ring ? 0.245 : 0.355;
+        const attributes = tag === 'circle' ? { cx: 0, cy: 0, r: radius }
+          : tag === 'rect' ? { x: -radius, y: -radius, width: 2 * radius, height: 2 * radius }
+          : { points: '0,-0.355 0.355,0.355 -0.355,0.355' };
+        Object.assign(attributes, { id: 'particle-' + shape, stroke: ring ? 'inherit' : 'none' });
+        if (ring) Object.assign(attributes, { fill: 'none', 'stroke-width': 0.28 });
+        for (const [key, value] of Object.entries(attributes)) glyph.setAttribute(key, value);
+        defs.append(glyph);
+      }
+      for (const shape of SHAPES) {
+        const group = document.createElementNS(SVG_NS, 'g');
+        group.id = 'grid-' + shape;
+        for (let row = 0; row < GRID_SIZE; row++) {
+          const rowGroup = document.createElementNS(SVG_NS, 'g');
+          rowGroup.id = `grid-${shape}-row-${row}`;
+          group.append(rowGroup);
+          for (let column = 0; column < GRID_SIZE; column++) {
+            const x = (column + 0.5) / GRID_SIZE;
+            const y = (row + 0.5) / GRID_SIZE;
+            const ring = shape.endsWith('-ring');
+            const radius = (ring ? 0.245 : 0.355) / GRID_SIZE;
+            const tag = shape === 'triangle' ? 'polygon' : shape.startsWith('circle') ? 'circle' : 'rect';
+            const element = document.createElementNS(SVG_NS, tag);
+            const attributes = tag === 'circle' ? { cx: x, cy: y, r: radius }
+              : tag === 'rect' ? { x: x - radius, y: y - radius, width: 2 * radius, height: 2 * radius }
+              : { points: `${x},${y - radius} ${x + radius},${y + radius} ${x - radius},${y + radius}` };
+            if (ring) Object.assign(attributes, { fill: 'none', stroke: 'inherit', 'stroke-width': 0.28 / GRID_SIZE });
+            else attributes.stroke = 'none';
+            for (const [key, value] of Object.entries(attributes)) element.setAttribute(key, value);
+            rowGroup.append(element);
+          }
+        }
+        defs.append(group);
+      }
+    }
+
+    function stickerCorners(cubie, face) {
+      return face.corners.map(point => point.map((value, axis) => value + cubie.position[axis]));
+    }
+
+    function drawSticker(points, color, shape, parent, row = null) {
+      // One reusable 49-shape grid is mapped onto the projected tile. SVG
+      // instances keep the animation light while preserving true perspective.
+      const [origin, right, , down] = points.map(project);
+      const element = document.createElementNS(SVG_NS, 'use');
+      element.setAttribute('href', '#grid-' + shape + (row === null ? '' : '-row-' + row));
+      const paint = `url(#gradient-${color})`;
+      element.setAttribute('fill', paint);
+      element.setAttribute('stroke', paint);
+      element.setAttribute('transform', `matrix(${right[0] - origin[0]} ${right[1] - origin[1]} ${down[0] - origin[0]} ${down[1] - origin[1]} ${origin[0]} ${origin[1]})`);
+      parent.append(element);
+    }
+
+    function polygon(points, fill, parent) {
+      const element = document.createElementNS(SVG_NS, 'polygon');
+      element.setAttribute('points', points.map(point => project(point).join(',')).join(' '));
+      element.setAttribute('fill', fill);
+      parent.append(element);
+    }
+
+    function render(progress = 0, elapsed = progress * TURN_DURATION) {
+      const visibleFaces = [];
+      const movingStickers = activeTurn?.type === 'ring'
+        ? new Set(activeTurn.moves.map(move => move.source.face)) : new Set();
+      for (const cubie of cubies) {
+        const turn = activeTurn?.type === 'layer'
+          ? activeTurn.turns.find(move => cubie.position[move.axis] === move.layer) : null;
+        const phase = turn ? Math.max(0, Math.min((elapsed - turn.delay) / TURN_DURATION, 1)) : 0;
+        // Quadratic ease-in: slow start, then continuous acceleration.
+        const transform = vector => turn
+          ? rotate(vector, turn.axis, turn.direction * phase ** 2 * Math.PI / 2) : vector;
+        for (const face of cubie.faces) {
+          const normal = transform(face.normal);
+          // Orthographic camera looks toward the origin from (1, 1, 1).
+          if (normal[0] + normal[1] + normal[2] <= 0.00001) continue;
+          const plastic = faceCorners(cubie.position, face.normal, 0.5).map(transform);
+          const depth = plastic.reduce((sum, point) => sum + point[0] + point[1] + point[2], 0) / 4;
+          visibleFaces.push({
+            plastic, depth, color: face.color, shape: face.shape,
+            sticker: face.color && !movingStickers.has(face)
+              ? stickerCorners(cubie, face).map(transform) : null
+          });
+        }
+      }
+      visibleFaces.sort((a, b) => a.depth - b.depth);
+      const fragment = document.createDocumentFragment();
+      for (const face of visibleFaces) {
+        polygon(face.plastic, 'var(--background)', fragment);
+        if (face.sticker) drawSticker(face.sticker, face.color, face.shape, fragment);
+      }
+      if (activeTurn?.type === 'ring') {
+        for (const move of activeTurn.moves) {
+          const phase = Math.max(0, Math.min(elapsed / RING_DURATION, 1));
+          const angle = move.direction * phase * 2 * Math.PI / 3;
+          for (const particle of move.particles) {
+            const center = hexPoint(particle.radius, particle.track + move.direction * phase * 2);
+            const u = rotate2(particle.u, angle);
+            const v = rotate2(particle.v, angle);
+            const element = document.createElementNS(SVG_NS, 'use');
+            element.setAttribute('href', '#particle-' + move.shape);
+            const paint = `url(#particle-${move.color}-${particle.row}-${particle.column})`;
+            element.setAttribute('fill', paint);
+            element.setAttribute('stroke', paint);
+            element.setAttribute('transform', `matrix(${u[0]} ${u[1]} ${v[0]} ${v[1]} ${center[0]} ${center[1]})`);
+            fragment.append(element);
+          }
+        }
+      }
+      cube.replaceChildren(fragment);
+    }
+
+    function ringSlots(ring) {
+      const slots = [];
+      for (const cubie of cubies) {
+        for (const face of cubie.faces) {
+          if (!face.color) continue;
+          const axis = face.normal.findIndex(value => value === 1);
+          if (axis === -1 || cubie.position[axis] !== 1) continue;
+          const a = (axis + 1) % 3;
+          const b = (axis + 2) % 3;
+          if (Math.max(1 - cubie.position[a], 1 - cubie.position[b]) !== ring) continue;
+          const center = cubie.position.map((value, index) => value + face.normal[index] * 0.5);
+          const [x, y] = project(center);
+          slots.push({ cubie, face, corners: stickerCorners(cubie, face), angle: Math.atan2(y, x) });
+        }
+      }
+      return slots.sort((a, b) => a.angle - b.angle);
+    }
+
+    function alignCorners(source, target) {
+      let corners;
+      let shortest = Infinity;
+      for (let offset = 0; offset < 4; offset++) {
+        const candidate = source.map((_, i) => target[(i + offset) % 4]);
+        const distance = candidate.reduce((sum, point, i) => {
+          const start = project(source[i]);
+          const end = project(point);
+          return sum + (end[0] - start[0]) ** 2 + (end[1] - start[1]) ** 2;
+        }, 0);
+        if (distance < shortest) {
+          shortest = distance;
+          corners = candidate;
+        }
+      }
+      return corners;
+    }
+
+    function rotate2([x, y], angle) {
+      return [x * Math.cos(angle) - y * Math.sin(angle), x * Math.sin(angle) + y * Math.cos(angle)];
+    }
+
+    function hexPoint(radius, track) {
+      const wrapped = ((track % 6) + 6) % 6;
+      const edge = Math.floor(wrapped);
+      const fraction = wrapped - edge;
+      const vertex = index => [radius * Math.sin(index * Math.PI / 3), -radius * Math.cos(index * Math.PI / 3)];
+      const a = vertex(edge), b = vertex(edge + 1);
+      return a.map((value, axis) => value + (b[axis] - value) * fraction);
+    }
+
+    function hexTrack([x, y]) {
+      const radius = Math.max(Math.abs(x) * 2 / Math.sqrt(3), Math.abs(y + x / Math.sqrt(3)), Math.abs(y - x / Math.sqrt(3)));
+      let track = 0, best = Infinity;
+      for (let edge = 0; edge < 6; edge++) {
+        const a = hexPoint(radius, edge), b = hexPoint(radius, edge + 1);
+        const dx = b[0] - a[0], dy = b[1] - a[1];
+        const fraction = Math.max(0, Math.min(((x-a[0])*dx + (y-a[1])*dy) / (dx*dx + dy*dy), 1));
+        const error = (x-a[0]-fraction*dx)**2 + (y-a[1]-fraction*dy)**2;
+        if (error < best) { best = error; track = edge + fraction; }
+      }
+      return { radius, track };
+    }
+
+    function createRingTurn(ring, direction, startedAt) {
+      const slots = ringSlots(ring);
+      const steps = RING_STEPS[ring];
+      const moves = slots.map((source, index) => {
+        const path = [source.corners];
+        for (let step = 1; step <= steps; step++) {
+          const next = slots[(index + direction * step + slots.length) % slots.length];
+          path.push(alignCorners(path[step - 1], next.corners));
+        }
+        const target = slots[(index + direction * steps + slots.length) % slots.length];
+        const corners = source.corners.map(project);
+        const u = corners[1].map((value, axis) => (value - corners[0][axis]) / GRID_SIZE);
+        const v = corners[3].map((value, axis) => (value - corners[0][axis]) / GRID_SIZE);
+        const particles = [];
+        for (let row = 0; row < GRID_SIZE; row++) for (let column = 0; column < GRID_SIZE; column++) {
+          const center = corners[0].map((value, axis) => value + u[axis] * (column + 0.5) + v[axis] * (row + 0.5));
+          particles.push({ row, column, u, v, ...hexTrack(center) });
+        }
+        // Match the exact 120-degree endpoint, preserving each glyph's shape.
+        const angle = direction * 2 * Math.PI / 3;
+        path[steps] = source.corners.map(point => {
+          const rotated = rotate2(project(point), angle);
+          return target.corners.reduce((best, candidate) => {
+            const distance = p => { const q = project(p); return (q[0]-rotated[0])**2+(q[1]-rotated[1])**2; };
+            return distance(candidate) < distance(best) ? candidate : best;
+          });
+        });
+        return { source, target, path, steps, particles, direction, color: source.face.color, shape: source.face.shape };
+      });
+      return { type: 'ring', ring, direction, startedAt, moves };
+    }
+
+    function commitTurn() {
+      if (activeTurn.type === 'ring') {
+        // Colors are snapshotted before updating any destination. Subsequent
+        // physical turns carry these same colors onto the other cube faces.
+        for (const move of activeTurn.moves) {
+          move.target.face.color = move.color;
+          move.target.face.shape = move.shape;
+          move.target.face.corners = move.path[move.steps].map(point =>
+            point.map((value, axis) => value - move.target.cubie.position[axis])
+          );
+        }
+        activeTurn = null;
+        return;
+      }
+      for (const cubie of cubies) {
+        // Determine membership before changing any coordinate, so each piece
+        // is transformed exactly once even when all three layers turn together.
+        const turn = activeTurn.turns.find(move => cubie.position[move.axis] === move.layer);
+        if (!turn) continue;
+        const { axis, direction } = turn;
+        cubie.position = rotate(cubie.position, axis, direction * Math.PI / 2).map(Math.round);
+        for (const face of cubie.faces) {
+          face.normal = rotate(face.normal, axis, direction * Math.PI / 2).map(Math.round);
+          face.corners = face.corners.map(point => rotate(point, axis, direction * Math.PI / 2).map(value => Math.round(value * 1e6) / 1e6));
+        }
+      }
+      activeTurn = null;
+    }
+
+    function parsePattern(text) {
+      const tokens = text.split(';').map(token => token.trim());
+      const rings = { inner: 0, mid: 1, middle: 1, outer: 2 };
+      const moves = tokens.map(token => {
+        const ring = token.match(/^(inner|mid|middle|outer)\s*([+-])$/);
+        if (ring) return { type: 'ring', ring: rings[ring[1]], direction: ring[2] === '+' ? 1 : -1 };
+        const layer = token.match(/^\(\s*([0-2])\s*,\s*([0-2])\s*,\s*([0-2])\s*\)\s*->\s*\(\s*([0-2])\s*,\s*([0-2])\s*,\s*([0-2])\s*\)\s*([+-])$/);
+        if (!layer) throw new Error('Invalid move: ' + token);
+        const from = layer.slice(1, 4).map(Number);
+        const to = layer.slice(4, 7).map(Number);
+        const shared = from.map((value, axis) => value === to[axis] ? axis : -1).filter(axis => axis !== -1);
+        if (shared.length !== 1 || from.some((value, axis) => axis !== shared[0] && Math.abs(value - to[axis]) !== 2)) {
+          throw new Error('Use opposite corners of a layer: ' + token);
+        }
+        const userAxis = shared[0];
+        // User (X,Y,Z) maps to renderer (1-Y, Z-1, 1-X).
+        // '+' is clockwise facing the layer from its visible side: right,
+        // left, or top respectively. This convention also covers inner layers.
+        return {
+          type: 'layer',
+          axis: [2, 0, 1][userAxis],
+          layer: userAxis === 2 ? from[userAxis] - 1 : 1 - from[userAxis],
+          direction: layer[7] === '+' ? -1 : 1
+        };
+      });
+      if (moves.some(move => move.type !== moves[0].type)) throw new Error('Keep each line to one move type.');
+      if (moves[0].type === 'layer') {
+        if (moves.some(move => move.axis !== moves[0].axis) || new Set(moves.map(move => move.layer)).size !== moves.length) {
+          throw new Error('Simultaneous cube turns must use distinct, parallel layers.');
+        }
+      } else if (new Set(moves.map(move => move.ring)).size !== moves.length) {
+        throw new Error('A ring can only move once per line.');
+      }
+      return { type: moves[0].type, moves };
+    }
+
+    function createAnimation(pattern, startedAt) {
+      if (pattern.type === 'ring') {
+        return {
+          type: 'ring', startedAt, duration: RING_DURATION,
+          moves: pattern.moves.flatMap(move => createRingTurn(move.ring, move.direction, startedAt).moves)
+        };
+      }
+      const adjacent = pattern.moves.some((move, index) => pattern.moves.some((other, j) =>
+        index !== j && Math.abs(move.layer - other.layer) === 1
+      ));
+      // With three possible layers, an adjacent pair or a three-layer chain
+      // follows the written move order. Separated outer layers stay in sync.
+      const turns = pattern.moves.map((move, index) => ({
+        ...move, delay: adjacent ? index * LAYER_STAGGER : 0
+      }));
+      return {
+        type: 'layer', startedAt, turns,
+        duration: TURN_DURATION + Math.max(...turns.map(turn => turn.delay))
+      };
+    }
+
+    function animate(now) {
+      if (!activeTurn && now >= nextTurnAt) {
+        // Keep both animation types equally likely as the layer pool grows.
+        const pool = Math.random() < 0.5 ? layerPatterns : ringPatterns;
+        const pattern = pool[Math.floor(Math.random() * pool.length)];
+        activeTurn = createAnimation(pattern, now);
+        nextTurnAt = now + TURN_INTERVAL;
+      }
+      if (activeTurn) {
+        const elapsed = reducedMotion.matches ? activeTurn.duration : now - activeTurn.startedAt;
+        const progress = Math.min(elapsed / activeTurn.duration, 1);
+        const eased = progress * progress * (3 - 2 * progress);
+        if (elapsed >= activeTurn.duration) {
+          commitTurn();
+          render();
+        } else {
+          render(eased, elapsed);
+        }
+      }
+      requestAnimationFrame(animate);
+    }
+
+    render();
+    requestAnimationFrame(animate);
+  </script>
+</body>
+</html>

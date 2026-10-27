@@ -45,6 +45,19 @@
       height: auto;
       overflow: visible;
     }
+    .credit {
+      display: block;
+      margin-top: 10px;
+      color: #776e68;
+      font: 400 13px/1.5 system-ui, sans-serif;
+      letter-spacing: 0.01em;
+    }
+    .credit a {
+      color: inherit;
+      text-decoration-thickness: 1px;
+      text-underline-offset: 3px;
+    }
+    .credit a:hover { color: #453c38; }
   </style>
 </head>
 <body>
@@ -55,7 +68,9 @@
     <defs id="glyphs"></defs>
     <g id="cube"></g>
   </svg>
-  <p class="tagline">Push the frontier of your talents</p>
+  <p class="tagline">Push the frontier of your talents
+    <span class="credit">A cube study, inspired by <a href="https://idler.ai/" target="_blank" rel="noopener noreferrer">idler.ai</a>.</span>
+  </p>
   <script>
     const SVG_NS = 'http://www.w3.org/2000/svg';
     const cube = document.querySelector('#cube');
